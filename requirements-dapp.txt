@@ -1,0 +1,9 @@
+# DApp / Web3 dependencies
+# Requires Microsoft C++ Build Tools on Windows FIRST:
+# https://visualstudio.microsoft.com/visual-cpp-build-tools/
+# (Download "Build Tools for Visual Studio", install "C++ build tools" workload)
+#
+# Then run: pip install -r requirements-dapp.txt
+
+web3>=6.15.0
+uniswap-python>=0.7.1

@@ -1,0 +1,33 @@
+# === Core ===
+python-dotenv>=1.0.0
+requests>=2.31.0
+schedule>=1.2.0
+websockets>=13.0
+
+# === Data Sources ===
+praw>=7.7.1                  # Reddit API (free)
+feedparser>=6.0.11           # RSS feed parser (CoinTelegraph, CoinDesk, Binance, WatcherGuru)
+websocket-client>=1.7.0      # Pump.fun real-time WebSocket watcher
+rich>=13.0.0                 # Live terminal dashboard
+fastapi>=0.110.0             # REST + WebSocket API for Next.js dashboard
+uvicorn>=0.29.0              # ASGI server for FastAPI
+
+# === Sentiment Analysis ===
+groq>=0.9.0                  # Groq LLM API (free tier - Llama 3.3)
+vaderSentiment>=3.3.2        # Fast offline fallback sentiment
+
+# === Utilities ===
+pandas>=2.1.0
+colorlog>=6.8.0
+
+# === CEX Trading ===
+ccxt>=4.3.0                  # Unified API for 100+ exchanges (Bybit demo/live, Binance, OKX)
+
+# === DApp / Web3 ===
+# NOTE: Requires Microsoft C++ Build Tools on Windows
+# Download: https://visualstudio.microsoft.com/visual-cpp-build-tools/
+# Then run: pip install web3 solders solana
+#
+# web3>=6.15.0          # Ethereum / Uniswap
+# solders>=0.21.0       # Solana primitives (Rust-based, fast)
+# solana>=0.34.0        # Solana RPC client
