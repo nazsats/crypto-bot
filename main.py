@@ -60,6 +60,11 @@ from config import (
     CEX_MIN_SENTIMENT,
     CEX_MIN_GAIN_PCT,
     TOP_GAINERS_INTERVAL_SEC,
+    TA_ENABLED,
+    TA_TIMEFRAME,
+    TA_CANDLE_LIMIT,
+    TRENDING_ENABLED,
+    SOCIAL_INSIGHTS_ENABLED,
 )
 from utils.terminal_ui import start_dashboard, log_activity
 from data.data_fetcher import DataFetcher
@@ -192,6 +197,57 @@ def run_cycle(fetcher: DataFetcher,
     state.last_cycle_time = time.time()
     log.info("─" * 60)
     log_activity("CYCLE", f"Cycle #{state.cycle_count} started")
+
+    # ── Pillar 1: Technical Analysis (Top 20 by market cap) ─────────────────
+    if TA_ENABLED:
+        try:
+            from analysis.top20_scanner import get_scanner
+            scanner = get_scanner()
+            ta_signals = scanner.scan_all()   # cached 5 min, fast
+            # Log summary table every cycle
+            log.info("\n" + scanner.summary_table())
+            log_activity("TA", f"Top 20 TA scan complete — {len(ta_signals)} coins")
+            # Alert on strong signals
+            for sig in scanner.strong_signals():
+                log_activity(
+                    "TA",
+                    f"{sig.call_emoji} {sig.symbol}: {sig.call} "
+                    f"(RSI={sig.rsi:.0f}, {sig.trend}, score={sig.ta_score:.2f})"
+                )
+                tg._send(
+                    f"📊 <b>TA Signal — {sig.symbol}</b>\n"
+                    f"{sig.call_emoji} <b>{sig.call}</b>\n"
+                    f"RSI: {sig.rsi:.1f} ({sig.rsi_label})\n"
+                    f"Trend: {sig.trend}\n"
+                    f"MACD: {sig.macd_label}\n"
+                    f"Volume spike: {'Yes 📈' if sig.volume_spike else 'No'}\n"
+                    f"Score: {sig.ta_score:.2f}\n"
+                    f"<i>{sig.summary}</i>"
+                )
+        except Exception as e:
+            log.error(f"TA scan error: {e}")
+
+    # ── Pillar 2: Trending Token Sentiment ──────────────────────────────────
+    if TRENDING_ENABLED:
+        try:
+            from analysis.trending_sentiment import get_trending_analyzer
+            trending_tokens = get_trending_analyzer().scan()   # cached 10 min
+            hype_tokens = [t for t in trending_tokens if t.signal == "HYPE"]
+            log_activity(
+                "TREND",
+                f"{len(trending_tokens)} trending tokens — "
+                f"{len(hype_tokens)} HYPE: {', '.join(t.symbol for t in hype_tokens[:4])}"
+            )
+            if hype_tokens:
+                hype_lines = "\n".join(
+                    f"  {t.signal_emoji} {t.symbol} ({t.name[:12]}): score={t.sentiment_score:.2f}"
+                    for t in hype_tokens[:5]
+                )
+                tg._send(
+                    f"🔥 <b>Trending Tokens — HYPE Alert</b>\n{hype_lines}"
+                )
+        except Exception as e:
+            log.error(f"Trending sentiment error: {e}")
 
     # 1. Fetch from all data sources
     posts = fetcher.fetch_all()
@@ -328,6 +384,9 @@ def main():
     log.info(f"  ETH:        {'ON' if ETH_SNIPER_ENABLED else 'OFF'}")
     log.info(f"  Base:       {'ON' if BASE_SNIPER_ENABLED else 'OFF'}")
     log.info(f"  CEX:        {'ON (' + CEX_MODE + ')' if CEX_ENABLED else 'OFF'}")
+    log.info(f"  TA Engine:  {'ON (' + TA_TIMEFRAME + ' candles)' if TA_ENABLED else 'OFF'}")
+    log.info(f"  Trending:   {'ON' if TRENDING_ENABLED else 'OFF'}")
+    log.info(f"  Social:     {'ON' if SOCIAL_INSIGHTS_ENABLED else 'OFF'}")
     log.info("=" * 60)
 
     if args.scan:
@@ -376,6 +435,32 @@ def main():
             log.info(f"Web dashboard API: http://localhost:{API_PORT}")
         except ImportError:
             log.warning("FastAPI/uvicorn not installed — web dashboard disabled")
+
+    # ── Warm-up Top 20 TA scan in background (so first API call is instant) ──
+    if TA_ENABLED:
+        import threading
+        def _warmup_ta():
+            try:
+                from analysis.top20_scanner import get_scanner
+                scanner = get_scanner()
+                scanner.scan_all(force=True)
+                log.info("[TA] Warm-up scan complete — Top 20 TA cache ready")
+                log_activity("TA", "Top 20 TA warm-up scan complete")
+            except Exception as e:
+                log.warning(f"[TA] Warm-up scan failed: {e}")
+        threading.Thread(target=_warmup_ta, daemon=True, name="TAWarmup").start()
+
+    # ── Warm-up trending sentiment in background ───────────────────────────
+    if TRENDING_ENABLED:
+        import threading as _t
+        def _warmup_trending():
+            try:
+                from analysis.trending_sentiment import get_trending_analyzer
+                get_trending_analyzer().scan(force=True)
+                log.info("[Trending] Warm-up scan complete")
+            except Exception as e:
+                log.warning(f"[Trending] Warm-up failed: {e}")
+        _t.Thread(target=_warmup_trending, daemon=True, name="TrendingWarmup").start()
 
     # ── Start Telegram command handler (background thread) ────────────
     start_command_handler(state)

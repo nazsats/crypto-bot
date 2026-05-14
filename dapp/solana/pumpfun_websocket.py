@@ -174,7 +174,13 @@ class PumpFunWebSocket:
             name=name,
             symbol=symbol,
             market_cap_usd=float(data.get("marketCapSol", 0)) * sol_price_usd,
-            price_sol=float(data.get("solAmount", 1)) / max(float(data.get("tokenAmount", 1)), 1),
+            # Default to 0 (not 1) on missing fields — 1 SOL/token is wildly
+            # wrong and would poison every downstream calc.
+            price_sol=(
+                float(data.get("solAmount", 0)) / float(data.get("tokenAmount", 0))
+                if float(data.get("tokenAmount", 0)) > 0
+                else 0.0
+            ),
             volume_24h=initial_buy_sol * sol_price_usd,
             created_timestamp=int(time.time()),
             bonding_curve=data.get("bondingCurveKey", ""),

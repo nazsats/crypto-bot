@@ -42,7 +42,7 @@ from config import (
     PUMPFUN_ENABLED,
     PUMPFUN_BUY_SOL,
     PUMPFUN_STOP_LOSS_PCT,
-    PUMPFUN_TAKE_PROFIT_PCT,
+    PUMPFUN_TAKE_PROFIT_MULT,
     PUMPFUN_LADDER_ENABLED,
     PUMPFUN_TAKE_PROFIT_LADDER,
     RUG_SCAN_ENABLED,
@@ -113,7 +113,9 @@ class PumpFunSniper:
             log.error("solders not installed. Run: pip install solders solana")
             self.keypair = None
         except Exception as e:
-            log.error(f"Invalid Solana private key: {e}")
+            # NEVER include the raw exception — some implementations echo the
+            # input secret in the message. Log type only.
+            log.error(f"Invalid Solana private key (parse failed: {type(e).__name__})")
             self.keypair = None
 
     # ──────────────────────────────────────────
@@ -169,7 +171,14 @@ class PumpFunSniper:
     # ──────────────────────────────────────────
     # PUBLIC: execute a buy via Jupiter aggregator
     # ──────────────────────────────────────────
-    def buy(self, token: PumpToken) -> bool:
+    def buy(self, token: PumpToken, sol_amount: Optional[float] = None) -> bool:
+        # Accept a per-call amount override (e.g. from Telegram manual buy)
+        # instead of mutating the global PUMPFUN_BUY_SOL.
+        amount = float(sol_amount) if sol_amount is not None else PUMPFUN_BUY_SOL
+        if amount <= 0:
+            log.error(f"Buy aborted: invalid sol_amount={amount}")
+            return False
+
         # ── Rug scan before spending any money ──────────────────────────
         if RUG_SCAN_ENABLED:
             from analysis.rug_scanner import is_safe_to_buy_solana
@@ -179,16 +188,16 @@ class PumpFunSniper:
 
         if not self.keypair:
             log.info(f"[DRY-RUN] Would BUY {token.symbol} (mint: {token.mint[:12]}...) "
-                     f"for {PUMPFUN_BUY_SOL} SOL | mcap=${token.market_cap_usd:,.0f}")
+                     f"for {amount} SOL | mcap=${token.market_cap_usd:,.0f}")
             return False
 
-        log.info(f"Buying {token.symbol} for {PUMPFUN_BUY_SOL} SOL via Jupiter...")
+        log.info(f"Buying {token.symbol} for {amount} SOL via Jupiter...")
 
         # 1. Get quote from Jupiter
         quote = self._get_jupiter_quote(
             input_mint=SOL_MINT,
             output_mint=token.mint,
-            amount_lamports=int(PUMPFUN_BUY_SOL * 1e9),
+            amount_lamports=int(amount * 1e9),
         )
         if not quote:
             return False
@@ -210,11 +219,11 @@ class PumpFunSniper:
         self.positions[token.mint] = SolPosition(
             mint=token.mint,
             symbol=token.symbol,
-            sol_spent=PUMPFUN_BUY_SOL,
+            sol_spent=amount,
             entry_price_sol=token.price_sol,
             token_amount=out_amount,
             stop_loss_sol=token.price_sol * (1 - PUMPFUN_STOP_LOSS_PCT),
-            take_profit_sol=token.price_sol * PUMPFUN_TAKE_PROFIT_PCT,
+            take_profit_sol=token.price_sol * PUMPFUN_TAKE_PROFIT_MULT,
             opened_at=time.time(),
         )
         return True

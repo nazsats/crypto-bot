@@ -115,7 +115,9 @@ class CEXLedger:
     # ── Buy ──────────────────────────────────────────────────────────────────
 
     def buy(self, symbol: str, price: float, usdt_amount: float,
-            score: float = 0.0, source: str = "") -> Optional[CEXPosition]:
+            score: float = 0.0, source: str = "",
+            take_profit_pct: Optional[float] = None,
+            stop_loss_pct:   Optional[float] = None) -> Optional[CEXPosition]:
         """
         Open a paper long position.
 
@@ -152,8 +154,8 @@ class CEXLedger:
                 current_price   = price,
                 usdt_spent      = usdt_amount,
                 quantity        = quantity,
-                take_profit_pct = self.take_profit_pct,
-                stop_loss_pct   = self.stop_loss_pct,
+                take_profit_pct = take_profit_pct if take_profit_pct is not None else self.take_profit_pct,
+                stop_loss_pct   = stop_loss_pct   if stop_loss_pct   is not None else self.stop_loss_pct,
                 signal_score    = score,
                 source          = source,
             )
@@ -189,7 +191,7 @@ class CEXLedger:
 
             exit_value = pos.quantity * current_price
             pnl_usdt   = exit_value - pos.usdt_spent
-            pnl_pct    = (current_price - pos.entry_price) / pos.entry_price * 100
+            pnl_pct    = ((current_price - pos.entry_price) / pos.entry_price * 100) if pos.entry_price > 0 else 0.0
 
             self.virtual_usdt += exit_value
             del self.positions[symbol]

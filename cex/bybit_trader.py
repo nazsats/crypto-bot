@@ -225,7 +225,10 @@ class CEXTrader:
             if signal == "SELL":
                 sym = symbol.upper()
                 if sym in self.ledger.positions:
-                    price = self._get_price(sym) or self.ledger.positions[sym].current_price
+                    # Always prefer a fresh price; fall back to last known
+                    # only if the live lookup fails.
+                    live = self._get_price(sym)
+                    price = live if live and live > 0 else self.ledger.positions[sym].current_price
                     self._execute_sell(sym, price, reason="sentiment_sell")
 
     # ── Execute buy ──────────────────────────────────────────────────────────
@@ -316,7 +319,7 @@ class CEXTrader:
     def manual_buy(
         self,
         symbol:          str,
-        usdt_amount:     float         = None,
+        usdt_amount:     Optional[float] = None,
         take_profit_pct: Optional[float] = None,
         stop_loss_pct:   Optional[float] = None,
     ) -> dict:
@@ -333,7 +336,20 @@ class CEXTrader:
             {"ok": True/False, "symbol": str, "price": float, "error": str or None}
         """
         sym = symbol.upper().replace("/USDT", "").replace("USDT", "")
-        amount = usdt_amount or self.usdt_per_trade
+
+        # Validate numeric inputs explicitly — never trust JSON-coerced values.
+        try:
+            amount = float(usdt_amount) if usdt_amount is not None else self.usdt_per_trade
+        except (TypeError, ValueError):
+            return {"ok": False, "symbol": sym, "error": "usdt_amount must be a number"}
+        if amount <= 0:
+            return {"ok": False, "symbol": sym, "error": "usdt_amount must be > 0"}
+
+        try:
+            tp = float(take_profit_pct) if take_profit_pct is not None else None
+            sl = float(stop_loss_pct)   if stop_loss_pct   is not None else None
+        except (TypeError, ValueError):
+            return {"ok": False, "symbol": sym, "error": "take_profit_pct/stop_loss_pct must be numbers"}
 
         if sym in self.ledger.positions:
             return {"ok": False, "symbol": sym, "error": f"Already holding {sym}"}
@@ -345,43 +361,38 @@ class CEXTrader:
         if not price or price <= 0:
             return {"ok": False, "symbol": sym, "error": f"Cannot fetch price for {sym}"}
 
-        # Override TP/SL on the ledger temporarily if custom values provided
-        old_tp = self.ledger.take_profit_pct
-        old_sl = self.ledger.stop_loss_pct
-        if take_profit_pct is not None:
-            self.ledger.take_profit_pct = take_profit_pct
-        if stop_loss_pct is not None:
-            self.ledger.stop_loss_pct = stop_loss_pct
-
+        # Per-position TP/SL — passed as args, no mutation of shared ledger state.
         if self.mode == "internal_paper":
             pos = self.ledger.buy(
-                symbol      = sym,
-                price       = price,
-                usdt_amount = amount,
-                source      = "manual",
+                symbol          = sym,
+                price           = price,
+                usdt_amount     = amount,
+                source          = "manual",
+                take_profit_pct = tp,
+                stop_loss_pct   = sl,
             )
         else:
             try:
                 qty   = amount / price
                 order = self._exchange.create_market_buy_order(f"{sym}/USDT", qty)
-                pos   = self.ledger.buy(sym, price, amount, source="manual")
+                pos   = self.ledger.buy(
+                    sym, price, amount,
+                    source="manual",
+                    take_profit_pct=tp,
+                    stop_loss_pct=sl,
+                )
                 log.info(f"Bybit manual buy order: {order}")
             except Exception as e:
-                # Restore TP/SL
-                self.ledger.take_profit_pct = old_tp
-                self.ledger.stop_loss_pct   = old_sl
                 return {"ok": False, "symbol": sym, "error": str(e)}
 
-        # Restore TP/SL defaults
-        self.ledger.take_profit_pct = old_tp
-        self.ledger.stop_loss_pct   = old_sl
-
         if pos:
+            tp_eff = tp if tp is not None else self.ledger.take_profit_pct
+            sl_eff = sl if sl is not None else self.ledger.stop_loss_pct
             log_activity(
                 "BUY",
                 f"[CEX Manual] {sym} @ ${price:,.4f}  "
                 f"spent=${amount:.0f} USDT  "
-                f"TP=+{take_profit_pct or old_tp:.0f}%  SL=-{stop_loss_pct or old_sl:.0f}%"
+                f"TP=+{tp_eff:.0f}%  SL=-{sl_eff:.0f}%"
             )
             return {"ok": True, "symbol": sym, "price": price, "usdt_spent": amount}
         else:

@@ -19,6 +19,7 @@ Devnet wallet:
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -32,7 +33,7 @@ from config import (
     PUMPFUN_STOP_LOSS_PCT,
     PUMPFUN_LADDER_ENABLED,
     PUMPFUN_TAKE_PROFIT_LADDER,
-    PUMPFUN_TAKE_PROFIT_PCT,
+    PUMPFUN_TAKE_PROFIT_MULT,
 )
 from utils.logger import get_logger
 import utils.telegram_notifier as tg
@@ -52,10 +53,19 @@ class PaperPosition:
     take_profit_sol: float
     opened_at: float = field(default_factory=time.time)
     ladder_levels_hit: list = field(default_factory=list)
+    # Preserved so ladder fractions are computed against the original size,
+    # not the (already-reduced) current token_amount — otherwise selling
+    # "25%" four times leaves ~31% held instead of 0%.
+    initial_token_amount: float = 0.0
+    initial_sol_spent: float = 0.0
 
     def __post_init__(self):
         if not self.ladder_levels_hit:
             self.ladder_levels_hit = [False] * len(PUMPFUN_TAKE_PROFIT_LADDER)
+        if not self.initial_token_amount:
+            self.initial_token_amount = self.token_amount
+        if not self.initial_sol_spent:
+            self.initial_sol_spent = self.sol_spent
 
 
 class PaperLedger:
@@ -71,43 +81,50 @@ class PaperLedger:
         self.total_trades   = 0
         self.winning_trades = 0
         self.realised_pnl   = 0.0            # SOL profit/loss from closed trades
+        # Single lock guards all mutations + iteration of self.positions.
+        self._lock = threading.RLock()
 
     # ──────────────────────────────────────────────────────────────────
     # BUY
     # ──────────────────────────────────────────────────────────────────
 
-    def buy(self, token) -> bool:
+    def buy(self, token, sol_amount: Optional[float] = None) -> bool:
         """Record a paper buy. token is a PumpToken dataclass."""
-        if token.mint in self.positions:
-            log.info(f"[PAPER] Already holding {token.symbol}, skipping duplicate buy")
+        amount_sol = float(sol_amount) if sol_amount is not None else PUMPFUN_BUY_SOL
+        if amount_sol <= 0:
+            log.warning(f"[PAPER] Invalid amount {amount_sol}; aborting buy")
             return False
 
-        amount_sol = PUMPFUN_BUY_SOL
-        if self.virtual_sol < amount_sol:
-            log.warning(f"[PAPER] Not enough virtual SOL ({self.virtual_sol:.3f} < {amount_sol})")
-            return False
+        with self._lock:
+            if token.mint in self.positions:
+                log.info(f"[PAPER] Already holding {token.symbol}, skipping duplicate buy")
+                return False
 
-        if token.price_sol <= 0:
-            log.warning(f"[PAPER] {token.symbol} has zero price, skipping")
-            return False
+            if self.virtual_sol < amount_sol:
+                log.warning(f"[PAPER] Not enough virtual SOL ({self.virtual_sol:.3f} < {amount_sol})")
+                return False
 
-        # Virtual token amount: how many tokens do we get for amount_sol?
-        token_amount = amount_sol / token.price_sol
+            if token.price_sol <= 0:
+                log.warning(f"[PAPER] {token.symbol} has zero price, skipping")
+                return False
 
-        pos = PaperPosition(
-            mint=token.mint,
-            symbol=token.symbol,
-            name=token.name,
-            sol_spent=amount_sol,
-            entry_price_sol=token.price_sol,
-            token_amount=token_amount,
-            stop_loss_sol=token.price_sol * (1 - PUMPFUN_STOP_LOSS_PCT),
-            take_profit_sol=token.price_sol * PUMPFUN_TAKE_PROFIT_PCT,
-        )
+            # Virtual token amount: how many tokens do we get for amount_sol?
+            token_amount = amount_sol / token.price_sol
 
-        self.positions[token.mint] = pos
-        self.virtual_sol -= amount_sol
-        self.total_trades += 1
+            pos = PaperPosition(
+                mint=token.mint,
+                symbol=token.symbol,
+                name=token.name,
+                sol_spent=amount_sol,
+                entry_price_sol=token.price_sol,
+                token_amount=token_amount,
+                stop_loss_sol=token.price_sol * (1 - PUMPFUN_STOP_LOSS_PCT),
+                take_profit_sol=token.price_sol * PUMPFUN_TAKE_PROFIT_MULT,
+            )
+
+            self.positions[token.mint] = pos
+            self.virtual_sol -= amount_sol
+            self.total_trades += 1
 
         log.info(
             f"[PAPER] BUY {token.symbol} @ {token.price_sol:.8f} SOL "
@@ -127,18 +144,20 @@ class PaperLedger:
     # ──────────────────────────────────────────────────────────────────
 
     def sell(self, mint: str, current_price_sol: float, reason: str = "manual") -> bool:
-        pos = self.positions.get(mint)
-        if not pos:
-            return False
+        with self._lock:
+            pos = self.positions.get(mint)
+            if not pos:
+                return False
 
-        proceeds   = pos.token_amount * current_price_sol
-        pnl_sol    = proceeds - pos.sol_spent
-        pnl_pct    = pnl_sol / pos.sol_spent * 100
+            proceeds   = pos.token_amount * current_price_sol
+            pnl_sol    = proceeds - pos.sol_spent
+            pnl_pct    = (pnl_sol / pos.sol_spent * 100) if pos.sol_spent > 0 else 0.0
 
-        self.virtual_sol  += proceeds
-        self.realised_pnl += pnl_sol
-        if pnl_sol >= 0:
-            self.winning_trades += 1
+            self.virtual_sol  += proceeds
+            self.realised_pnl += pnl_sol
+            if pnl_sol >= 0:
+                self.winning_trades += 1
+            del self.positions[mint]
 
         log.info(
             f"[PAPER] SELL {pos.symbol} @ {current_price_sol:.8f} SOL "
@@ -151,26 +170,35 @@ class PaperLedger:
             amount_sol=pos.sol_spent,
             reason=reason,
         )
-        del self.positions[mint]
         return True
 
     def sell_partial(self, mint: str, fraction: float,
                      current_price_sol: float, reason: str) -> bool:
-        """Sell a fraction of a position (for ladder exits)."""
-        pos = self.positions.get(mint)
-        if not pos:
-            return False
+        """Sell `fraction` of the ORIGINAL position size (not the current
+        remaining size). Ladder fractions are intended as cumulative — selling
+        25% four times must close the position, not leave ~31% held."""
+        with self._lock:
+            pos = self.positions.get(mint)
+            if not pos:
+                return False
 
-        sell_tokens = pos.token_amount * fraction
-        proceeds    = sell_tokens * current_price_sol
-        cost_basis  = pos.sol_spent * fraction
-        pnl_sol     = proceeds - cost_basis
-        pnl_pct     = pnl_sol / cost_basis * 100 if cost_basis > 0 else 0
+            sell_tokens = pos.initial_token_amount * fraction
+            sell_tokens = min(sell_tokens, pos.token_amount)  # don't go negative
+            if sell_tokens <= 0:
+                return False
+            cost_basis  = pos.initial_sol_spent * fraction
+            proceeds    = sell_tokens * current_price_sol
+            pnl_sol     = proceeds - cost_basis
+            pnl_pct     = pnl_sol / cost_basis * 100 if cost_basis > 0 else 0
 
-        pos.token_amount -= sell_tokens
-        pos.sol_spent    -= cost_basis
-        self.virtual_sol += proceeds
-        self.realised_pnl += pnl_sol
+            pos.token_amount -= sell_tokens
+            pos.sol_spent    = max(pos.sol_spent - cost_basis, 0.0)
+            self.virtual_sol += proceeds
+            self.realised_pnl += pnl_sol
+
+            position_empty = pos.token_amount <= 1e-9
+            if position_empty and mint in self.positions:
+                del self.positions[mint]
 
         log.info(
             f"[PAPER] PARTIAL SELL {pos.symbol} ({fraction*100:.0f}%) @ "
@@ -183,8 +211,6 @@ class PaperLedger:
             amount_sol=cost_basis,
             reason=f"{reason} ({fraction*100:.0f}% partial)",
         )
-        if pos.token_amount <= 0:
-            del self.positions[mint]
         return True
 
     # ──────────────────────────────────────────────────────────────────
@@ -196,8 +222,13 @@ class PaperLedger:
         Check all paper positions for stop-loss / ladder exits.
         get_token_fn: callable(mint) → PumpToken | None  (from PumpFunSniper)
         """
-        for mint in list(self.positions.keys()):
-            pos   = self.positions.get(mint)
+        # Take a snapshot under the lock so we don't iterate while another
+        # thread mutates self.positions (e.g. a Telegram sell handler).
+        with self._lock:
+            mints = list(self.positions.keys())
+        for mint in mints:
+            with self._lock:
+                pos = self.positions.get(mint)
             if not pos:
                 continue
             token = get_token_fn(mint)
@@ -240,11 +271,17 @@ class PaperLedger:
         positions_data = []
         unrealised_pnl = 0.0
 
-        for mint, pos in self.positions.items():
+        with self._lock:
+            snapshot = list(self.positions.items())
+        for mint, pos in snapshot:
             token = get_token_fn(mint)
             current = token.price_sol if token else pos.entry_price_sol
-            pnl_pct = (current - pos.entry_price_sol) / pos.entry_price_sol * 100
-            pnl_sol = (current - pos.entry_price_sol) / pos.entry_price_sol * pos.sol_spent
+            if pos.entry_price_sol > 0:
+                pnl_pct = (current - pos.entry_price_sol) / pos.entry_price_sol * 100
+                pnl_sol = (current - pos.entry_price_sol) / pos.entry_price_sol * pos.sol_spent
+            else:
+                pnl_pct = 0.0
+                pnl_sol = 0.0
             unrealised_pnl += pnl_sol
 
             positions_data.append({

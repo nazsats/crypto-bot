@@ -58,8 +58,10 @@ PUMPFUN_ENABLED         = False         # Set True when Solana wallet ready
 PUMPFUN_BUY_SOL         = 0.05          # SOL per snipe (~$7-10)
 PUMPFUN_MIN_SENTIMENT   = 0.70          # Only snipe if LLM score >= this
 PUMPFUN_SELL_AT_MARKET_CAP = 100_000    # Auto-sell at $100k market cap
-PUMPFUN_STOP_LOSS_PCT   = 0.30          # 30% stop-loss (memecoins are volatile)
-PUMPFUN_TAKE_PROFIT_PCT = 3.0           # 3x take-profit (legacy, used if ladder disabled)
+PUMPFUN_STOP_LOSS_PCT   = 0.30          # 30% stop-loss as fraction (memecoins are volatile)
+PUMPFUN_TAKE_PROFIT_MULT = 3.0          # 3x take-profit multiplier (legacy, used if ladder disabled)
+# Backwards-compat alias — remove once all callers migrate.
+PUMPFUN_TAKE_PROFIT_PCT = PUMPFUN_TAKE_PROFIT_MULT
 
 # ── Take-Profit Ladder ────────────────────────
 # Each tuple: (price_multiplier, fraction_of_position_to_sell)
@@ -116,7 +118,54 @@ TRACKED_COINS = {
     "BONK": {"reddit_keywords": ["bonk", "$bonk"]},
     "XRP":  {"reddit_keywords": ["ripple", "xrp", "$xrp"]},
     "BNB":  {"reddit_keywords": ["binance coin", "bnb", "$bnb"]},
+    "ADA":  {"reddit_keywords": ["cardano", "ada", "$ada"]},
+    "AVAX": {"reddit_keywords": ["avalanche", "avax", "$avax"]},
+    "TRX":  {"reddit_keywords": ["tron", "trx", "$trx"]},
+    "TON":  {"reddit_keywords": ["toncoin", "ton", "$ton"]},
+    "LINK": {"reddit_keywords": ["chainlink", "link", "$link"]},
+    "DOT":  {"reddit_keywords": ["polkadot", "dot", "$dot"]},
+    "BCH":  {"reddit_keywords": ["bitcoin cash", "bch", "$bch"]},
+    "NEAR": {"reddit_keywords": ["near protocol", "near", "$near"]},
+    "LTC":  {"reddit_keywords": ["litecoin", "ltc", "$ltc"]},
+    "UNI":  {"reddit_keywords": ["uniswap", "uni", "$uni"]},
+    "APT":  {"reddit_keywords": ["aptos", "apt", "$apt"]},
+    "OP":   {"reddit_keywords": ["optimism", "op", "$op"]},
+    "ARB":  {"reddit_keywords": ["arbitrum", "arb", "$arb"]},
 }
+
+# ─────────────────────────────────────────────
+# TOP 20 by MARKET CAP (for Technical Analysis)
+# ─────────────────────────────────────────────
+# These are the only coins on which TA is run.
+# Stablecoins excluded. Update periodically.
+TOP_20_COINS = [
+    "BTC", "ETH", "BNB", "SOL", "XRP",
+    "ADA", "AVAX", "DOGE", "TRX", "TON",
+    "LINK", "SHIB", "DOT", "BCH", "NEAR",
+    "LTC", "UNI", "APT", "OP", "ARB",
+]
+
+# ─────────────────────────────────────────────
+# TECHNICAL ANALYSIS SETTINGS
+# ─────────────────────────────────────────────
+TA_ENABLED          = os.getenv("TA_ENABLED", "true").lower() == "true"
+TA_TIMEFRAME        = os.getenv("TA_TIMEFRAME", "1h")        # "15m"|"1h"|"4h"
+TA_CANDLE_LIMIT     = int(os.getenv("TA_CANDLE_LIMIT", "100"))
+TA_CACHE_TTL_SEC    = int(os.getenv("TA_CACHE_TTL_SEC", "300"))  # 5 min
+RSI_OVERSOLD        = float(os.getenv("RSI_OVERSOLD",  "30"))
+RSI_OVERBOUGHT      = float(os.getenv("RSI_OVERBOUGHT", "70"))
+
+# ─────────────────────────────────────────────
+# TRENDING SENTIMENT SETTINGS
+# ─────────────────────────────────────────────
+TRENDING_ENABLED    = os.getenv("TRENDING_ENABLED", "true").lower() == "true"
+TRENDING_CACHE_TTL  = int(os.getenv("TRENDING_CACHE_TTL", "600"))  # 10 min
+
+# ─────────────────────────────────────────────
+# SOCIAL INSIGHTS SETTINGS
+# ─────────────────────────────────────────────
+SOCIAL_INSIGHTS_ENABLED = os.getenv("SOCIAL_INSIGHTS_ENABLED", "true").lower() == "true"
+SOCIAL_CACHE_TTL        = int(os.getenv("SOCIAL_CACHE_TTL", "900"))    # 15 min
 
 # ─────────────────────────────────────────────
 # REDDIT SOURCES FOR MEMECOIN SENTIMENT
@@ -156,8 +205,16 @@ WHALE_WALLETS: list[str] = os.getenv("WHALE_WALLETS", "").split(",") if os.geten
 # ─────────────────────────────────────────────
 TERMINAL_DASHBOARD  = os.getenv("TERMINAL_DASHBOARD", "true").lower() == "true"
 WEB_DASHBOARD       = os.getenv("WEB_DASHBOARD", "true").lower() == "true"
-API_HOST            = os.getenv("API_HOST", "0.0.0.0")
+API_HOST            = os.getenv("API_HOST", "127.0.0.1")   # bind loopback by default; only expose if explicitly set
 API_PORT            = int(os.getenv("API_PORT", "8000"))
+# Required bearer token for any state-changing API call. If empty, mutating
+# endpoints are disabled. Set via env: API_AUTH_TOKEN=<random-long-string>
+API_AUTH_TOKEN      = os.getenv("API_AUTH_TOKEN", "")
+# Comma-separated list of allowed origins for CORS. Default is local-dev only.
+API_CORS_ORIGINS    = [o.strip() for o in os.getenv(
+    "API_CORS_ORIGINS",
+    "http://localhost:3000,http://127.0.0.1:3000"
+).split(",") if o.strip()]
 
 # ─────────────────────────────────────────────
 # CEX TRADING (Bybit / internal paper)

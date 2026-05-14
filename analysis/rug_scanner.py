@@ -169,7 +169,16 @@ class EthHoneypotChecker:
             blocked = True
 
         # Liquidity check
-        liquidity = data.get("liquidity", {}).get("usd", 0) or 0
+        # liquidity may be missing, None, a dict, or even a list — guard each step.
+        liq = data.get("liquidity")
+        if isinstance(liq, dict):
+            liquidity = liq.get("usd", 0) or 0
+        else:
+            liquidity = 0
+        try:
+            liquidity = float(liquidity)
+        except (TypeError, ValueError):
+            liquidity = 0.0
         if liquidity < self.MIN_LIQUIDITY:
             warnings.append(f"Low liquidity: ${liquidity:,.0f}")
             blocked = True

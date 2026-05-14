@@ -35,6 +35,14 @@ log = get_logger("tg_bot")
 _BASE = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 
+def _safe(msg: object) -> str:
+    """Redact the bot token from any string that might be logged."""
+    s = str(msg)
+    if TELEGRAM_BOT_TOKEN and TELEGRAM_BOT_TOKEN in s:
+        s = s.replace(TELEGRAM_BOT_TOKEN, "***REDACTED***")
+    return s
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # LOW-LEVEL SEND HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -57,9 +65,9 @@ def _send(chat_id: str, text: str, reply_markup: dict = None):
                 payload.pop("parse_mode")
                 requests.post(f"{_BASE}/sendMessage", json=payload, timeout=10)
             else:
-                log.warning(f"Telegram send failed: {resp.status_code} {resp.text[:200]}")
+                log.warning(f"Telegram send failed: {resp.status_code} {_safe(resp.text[:200])}")
     except Exception as e:
-        log.warning(f"Telegram send error: {e}")
+        log.warning(f"Telegram send error: {_safe(e)}")
 
 
 def _answer_callback(callback_query_id: str, text: str = ""):
@@ -122,9 +130,23 @@ def _sell_keyboard(positions: dict) -> dict:
     buttons.append([{"text": "🔙 Back to Menu", "callback_data": "cmd_menu"}])
     return {"inline_keyboard": buttons}
 
-def _confirm_buy_keyboard(token_name: str, sol: float) -> dict:
+_PENDING_BUYS: dict[str, tuple[str, float]] = {}  # token_id -> (mint, sol_amount)
+_pending_lock = threading.Lock() if False else None  # placeholder; module-level dict access is GIL-safe enough here
+
+
+def _confirm_buy_keyboard(mint: str, sol: float) -> dict:
+    """Key the callback on a short opaque id mapped to (mint, sol) so symbols
+    with underscores or spoofed clones cannot confuse the parser/resolver."""
+    import secrets
+    token_id = secrets.token_urlsafe(8)
+    _PENDING_BUYS[token_id] = (mint, float(sol))
+    # Bound the cache so it doesn't grow forever.
+    if len(_PENDING_BUYS) > 256:
+        # Drop oldest 64
+        for k in list(_PENDING_BUYS.keys())[:64]:
+            _PENDING_BUYS.pop(k, None)
     return {"inline_keyboard": [[
-        {"text": "✅ Buy Now",  "callback_data": f"confirm_buy_{token_name}_{sol}"},
+        {"text": "✅ Buy Now",  "callback_data": f"confirm_buy_{token_id}"},
         {"text": "❌ Skip",    "callback_data": "skip_buy"},
     ]]}
 
@@ -286,42 +308,48 @@ def _cmd_buy(chat_id: str, args: list[str], state):
         f"Market cap: <b>${token.market_cap_usd:,.0f}</b>\n"
         f"Price:      {token.price_sol:.8f} SOL\n\n"
         f"Buy <b>{sol_amount} SOL</b> worth?",
-        reply_markup=_confirm_buy_keyboard(token.symbol, sol_amount),
+        reply_markup=_confirm_buy_keyboard(token.mint, sol_amount),
     )
 
 
 def _handle_confirm_buy(chat_id: str, data: str, state):
-    """Handle the ✅ Buy Now button press."""
-    parts      = data.split("_", 3)   # confirm_buy_SYMBOL_SOL
-    token_name = parts[2] if len(parts) > 2 else ""
-    sol_amount = float(parts[3]) if len(parts) > 3 else 0.05
+    """Handle the ✅ Buy Now button press.
+
+    callback_data is `confirm_buy_<token_id>`; the token_id maps to the exact
+    (mint, sol_amount) captured when the prompt was sent — so symbols with
+    underscores can't break parsing and the user can't be tricked into buying
+    a spoofed clone with the same ticker.
+    """
+    token_id = data[len("confirm_buy_"):] if data.startswith("confirm_buy_") else ""
+    entry    = _PENDING_BUYS.pop(token_id, None)
+    if not entry:
+        _send(chat_id, "❌ This buy prompt has expired. Please run /buy again.", reply_markup=BACK_MENU)
+        return
+    mint, sol_amount = entry
 
     pumpfun = state.pumpfun
     if not pumpfun:
         _send(chat_id, "❌ Pump.fun not initialized.")
         return
 
-    token = pumpfun.find_token(token_name)
+    # Resolve by mint (not symbol) so we always buy the exact token shown.
+    token = pumpfun.get_token_by_mint(mint)
     if not token:
-        _send(chat_id, f"❌ {html.escape(token_name)} no longer available.", reply_markup=BACK_MENU)
+        _send(chat_id, f"❌ Token <code>{html.escape(mint[:12])}...</code> no longer available.",
+              reply_markup=BACK_MENU)
         return
 
-    import config as cfg
-    original = cfg.PUMPFUN_BUY_SOL
-    cfg.PUMPFUN_BUY_SOL = sol_amount
-
     if state.paper_trading and state.paper_ledger:
-        success = state.paper_ledger.buy(token)
+        success = state.paper_ledger.buy(token, sol_amount=sol_amount)
         result_msg = f"📋 Paper buy recorded: <b>{html.escape(token.symbol)}</b> for {sol_amount} SOL"
     else:
-        success = pumpfun.buy(token)
+        success = pumpfun.buy(token, sol_amount=sol_amount)
         result_msg = (
             f"✅ <b>Buy executed!</b> {html.escape(token.symbol)} for {sol_amount} SOL"
             if success else
             f"❌ Buy failed — check logs."
         )
 
-    cfg.PUMPFUN_BUY_SOL = original
     _send(chat_id, result_msg, reply_markup=BACK_MENU)
 
 

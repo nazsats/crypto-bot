@@ -202,7 +202,14 @@ class UniswapSniper:
             address=Web3.to_checksum_address(router_addr), abi=ROUTER_ABI)
         self.factory = self.w3.eth.contract(
             address=Web3.to_checksum_address(factory_addr), abi=FACTORY_ABI)
-        self.account = self.w3.eth.account.from_key(WALLET_PRIVATE_KEY)
+        try:
+            self.account = self.w3.eth.account.from_key(WALLET_PRIVATE_KEY)
+        except Exception as e:
+            # Never log the exception value — it may echo the private key.
+            log.error(f"Invalid WALLET_PRIVATE_KEY (parse failed: {type(e).__name__}); ETH sniper disabled")
+            self.w3 = None
+            self.account = None
+            return
 
         log.info(f"{chain} sniper ready | wallet: {self.account.address[:10]}...")
 
@@ -249,7 +256,9 @@ class UniswapSniper:
             log.error(f"getAmountsOut failed: {e}")
             return False
 
-        nonce = self.w3.eth.get_transaction_count(self.account.address)
+        # Use "pending" so back-to-back txns (approve + swap) don't reuse the
+        # same nonce while the first sits in the mempool.
+        nonce = self.w3.eth.get_transaction_count(self.account.address, "pending")
         tx = self.router.functions.swapExactETHForTokens(
             amount_out_min, path, self.account.address, deadline
         ).build_transaction({
@@ -277,7 +286,7 @@ class UniswapSniper:
         except Exception:
             price_eth = buy_amount / (amounts[1] / 1e18) if amounts[1] > 0 else 0
 
-        from config import PUMPFUN_STOP_LOSS_PCT, PUMPFUN_TAKE_PROFIT_PCT
+        from config import PUMPFUN_STOP_LOSS_PCT, PUMPFUN_TAKE_PROFIT_MULT
         self.positions[token_address] = EthPosition(
             token_address=token_address,
             symbol=symbol,
@@ -285,7 +294,7 @@ class UniswapSniper:
             entry_price_eth=price_eth,
             token_amount=amounts[1],
             stop_loss_eth=price_eth * (1 - PUMPFUN_STOP_LOSS_PCT),
-            take_profit_eth=price_eth * PUMPFUN_TAKE_PROFIT_PCT,
+            take_profit_eth=price_eth * PUMPFUN_TAKE_PROFIT_MULT,
             chain=self.chain,
         )
         return True
@@ -331,8 +340,9 @@ class UniswapSniper:
             return
 
         # Approve
-        allowance_check = token_contract.functions.balanceOf  # reuse contract
-        nonce = self.w3.eth.get_transaction_count(self.account.address)
+        # Use "pending" so back-to-back txns (approve + swap) don't reuse the
+        # same nonce while the first sits in the mempool.
+        nonce = self.w3.eth.get_transaction_count(self.account.address, "pending")
         approve_tx = token_contract.functions.approve(
             self.router.address, balance * 2
         ).build_transaction({
@@ -348,7 +358,9 @@ class UniswapSniper:
         amounts = self.router.functions.getAmountsOut(balance, path).call()
         amount_out_min = int(amounts[1] * (1 - ETH_SLIPPAGE_PCT / 100))
 
-        nonce = self.w3.eth.get_transaction_count(self.account.address)
+        # Use "pending" so back-to-back txns (approve + swap) don't reuse the
+        # same nonce while the first sits in the mempool.
+        nonce = self.w3.eth.get_transaction_count(self.account.address, "pending")
         tx = self.router.functions.swapExactTokensForETH(
             balance, amount_out_min, path, self.account.address, deadline
         ).build_transaction({

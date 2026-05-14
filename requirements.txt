@@ -18,6 +18,7 @@ vaderSentiment>=3.3.2        # Fast offline fallback sentiment
 
 # === Utilities ===
 pandas>=2.1.0
+numpy>=1.26.0
 colorlog>=6.8.0
 
 # === CEX Trading ===

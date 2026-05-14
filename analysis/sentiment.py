@@ -167,11 +167,11 @@ Return ONLY valid JSON with these fields:
                 max_tokens=200,
             )
             raw = response.choices[0].message.content.strip()
-            # Strip markdown code blocks if present
+            # Strip ```/```json fences (and trailing fence) robustly.
             if raw.startswith("```"):
-                raw = raw.split("```")[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
+                raw = raw.strip("`").strip()
+                if raw.lower().startswith("json"):
+                    raw = raw[4:].lstrip()
             data = json.loads(raw)
             score = float(data["score"])
             summary = data.get("narrative", "No summary")

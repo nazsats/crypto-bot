@@ -196,9 +196,9 @@ class WhaleTracker:
             if PUMPFUN_PROGRAM_ID in str(msg):
                 return True
 
-        # Fallback: check if the tx description contains "pump"
-        desc = str(tx).lower()
-        return "pump" in desc and "buy" in desc
+        # No reliable Pump.fun marker found. Refusing to guess from substring
+        # matches like "pump" + "buy" — too many false positives.
+        return False
 
     def _extract_sol_amount(self, tx: dict) -> float:
         """Extract how much SOL was spent in the transaction."""
@@ -219,7 +219,13 @@ class WhaleTracker:
         Looks in token balances changed by the transaction.
         """
         # Solscan provides tokenTransfers in transaction detail
-        token_transfers = tx.get("tokenTransfers", []) or tx.get("tokenBalaneChanges", [])
+        # Note: try both the (correct) Solscan field and a common typo seen in
+        # some sample data.
+        token_transfers = (
+            tx.get("tokenTransfers", [])
+            or tx.get("tokenBalanceChanges", [])
+            or tx.get("tokenBalaneChanges", [])  # historical typo, kept for compat
+        )
         for transfer in token_transfers:
             owner = transfer.get("owner", "") or transfer.get("account", "")
             if owner == buyer_wallet:
@@ -227,13 +233,23 @@ class WhaleTracker:
                 if mint and len(mint) > 30:   # valid Solana address length
                     return mint
 
-        # Fallback: look for any 32-44 char base58 string that could be a mint
+        # Fallback: look for any 32-44 char base58 string that could be a mint.
+        # Filter out well-known Solana program/system addresses so we don't
+        # accidentally try to buy "the SPL Token program".
         import re
+        WELL_KNOWN = {
+            buyer_wallet,
+            PUMPFUN_PROGRAM_ID,
+            "11111111111111111111111111111111",                  # System Program
+            "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",        # SPL Token
+            "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",        # Associated Token
+            "ComputeBudget111111111111111111111111111111",
+            "SysvarRent111111111111111111111111111111111",
+            "So11111111111111111111111111111111111111112",        # wSOL
+        }
         text = str(tx)
-        # Solana addresses are base58, 32-44 chars, match conservatively
         candidates = re.findall(r'[1-9A-HJ-NP-Za-km-z]{43,44}', text)
         for c in candidates:
-            if c != buyer_wallet and c != PUMPFUN_PROGRAM_ID:
+            if c not in WELL_KNOWN:
                 return c
-
         return None
